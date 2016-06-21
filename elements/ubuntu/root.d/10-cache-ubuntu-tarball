@@ -61,7 +61,9 @@ function get_ubuntu_image() {
         CACHED_IMAGE=$IMAGE_LOCATION
         BASE_IMAGE_FILE=`basename $DIB_LOCAL_IMAGE`
         BASE_IMAGE_TAR=$BASE_IMAGE_FILE.tgz
-
+        CACHED_TAR=${DIB_CACHED_TAR:-""}
+        CACHED_FILE_LOCK=$DIB_IMAGE_CACHE/$BASE_IMAGE_FILE.lock
+        
         if [ ! -f $CACHED_TAR -o \
             $DIB_IMAGE_CACHE/$BASE_IMAGE_FILE -nt $CACHED_TAR ] ; then
 
