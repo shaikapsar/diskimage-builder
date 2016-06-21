@@ -19,6 +19,7 @@ SHA256SUMS=${SHA256SUMS:-https://${DIB_CLOUD_IMAGES##http?(s)://}/$DIB_RELEASE/c
 CACHED_FILE=$DIB_IMAGE_CACHE/$BASE_IMAGE_FILE
 CACHED_FILE_LOCK=$DIB_IMAGE_CACHE/$BASE_IMAGE_FILE.lock
 CACHED_SUMS=$DIB_IMAGE_CACHE/SHA256SUMS.ubuntu.$DIB_RELEASE.$ARCH
+DIB_LOCAL_IMAGE=${DIB_LOCAL_IMAGE:-""}
 
 function get_ubuntu_tarball() {
     if [ -n "$DIB_OFFLINE" -a -f "$CACHED_FILE" ] ; then
@@ -50,6 +51,56 @@ function get_ubuntu_tarball() {
     sudo tar -C $TARGET_ROOT --numeric-owner -xzf $DIB_IMAGE_CACHE/$BASE_IMAGE_FILE
 }
 
+function get_ubuntu_image() {
+    if [ -n "$DIB_OFFLINE" -a -f "$CACHED_FILE" ] ; then
+        echo "Not checking freshness of cached $CACHED_FILE."
+    else
+        IMAGE_LOCATION=$DIB_LOCAL_IMAGE
+        # No need to copy a local image into the cache directory, so just specify
+        # the cached path as the original path.
+        CACHED_IMAGE=$IMAGE_LOCATION
+        BASE_IMAGE_FILE=`basename $DIB_LOCAL_IMAGE`
+        BASE_IMAGE_TAR=$BASE_IMAGE_FILE.tgz
+
+        if [ ! -f $CACHED_TAR -o \
+            $DIB_IMAGE_CACHE/$BASE_IMAGE_FILE -nt $CACHED_TAR ] ; then
+
+            echo "Repacking base image as tarball from local image."
+            WORKING=$(mktemp -d)
+            EACTION="rm -r $WORKING"
+            trap "$EACTION" EXIT
+            RAW_FILE=$(mktemp --tmpdir=$WORKING XXXXXX.raw)
+            qemu-img convert -f qcow2 -O raw $CACHED_FILE $RAW_FILE
+            MAGIC_BIT=p1
+            # NOTE: On RHEL, partprobe of /dev/loop0 does not create /dev/loop0p2,
+            # while kpartx at least creates /dev/mapper/loop0p2.
+           LOOPDEV=$(sudo kpartx -av $RAW_FILE | awk "/loop[0-9]+$MAGIC_BIT/ {print \$3}")
+           # If running inside Docker, make our nodes manually, because udev will not be working.
+           if [ -f /.dockerenv ]; then
+               sudo dmsetup --noudevsync mknodes
+           fi
+           export LOOPDEV=$LOOPDEV
+           echo "Loop device is set to: $LOOPDEV"
+           if ! timeout 5 sh -c "while ! [ -e /dev/mapper/$LOOPDEV ]; do sleep 1; done"; then
+             echo "Error: Could not find /dev/mapper/$LOOPDEV"
+             exit 1
+           fi
+           EACTION="sudo kpartx -d $RAW_FILE;$EACTION"
+           trap "$EACTION" EXIT
+           mkdir $WORKING/mnt
+           sudo mount /dev/mapper/$LOOPDEV $WORKING/mnt
+           EACTION="sudo umount -f $WORKING/mnt;$EACTION"
+           trap "$EACTION" EXIT
+           # Chroot in so that we get the correct uid/gid
+           sudo chroot $WORKING/mnt bin/tar -cz . > $WORKING/tmp.tar
+           mv $WORKING/tmp.tar $DIB_IMAGE_CACHE/$BASE_IMAGE_TAR
+        fi
+    fi
+    # Extract the base image (use --numeric-owner to avoid UID/GID mismatch between
+    # image tarball and host OS e.g. when building Ubuntu image on an openSUSE host)
+    sudo tar -C $TARGET_ROOT --numeric-owner -xzf $DIB_IMAGE_CACHE/$BASE_IMAGE_FILE
+}
+
 (
     echo "Getting $CACHED_FILE_LOCK: $(date)"
     # Wait up to 20 minutes for another process to download
@@ -57,5 +108,9 @@ function get_ubuntu_tarball() {
         echo "Did not get $CACHED_FILE_LOCK: $(date)"
         exit 1
     fi
-    get_ubuntu_tarball
+    if [ -n "$DIB_LOCAL_IMAGE" ]; then
+        get_ubuntu_image
+    else
+        get_ubuntu_tarball
+    fi
 ) 9> $CACHED_FILE_LOCK
